@@ -227,31 +227,32 @@ static void slave_task(void *pvParameters)
     }
 
 
-
-    while(1) {
+    DisableIRQ(UART3_RX_TX_IRQn);
+    DisableIRQ(UART4_RX_TX_IRQn);
+	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  */
+	handle->uart_rtos_handle.base->S2 |= (1<<1);	/* LBKDE LIN Break Detection Enable */
+    while(1)
+    {
     	char dummy;
     	/* Init the message header buffer */
     	memset(lin1p3_header, 0, size_of_lin_header_d);
     	/* Wait for a synch break This code is just waiting for one byte 0, *** CHANGE THIS WITH A REAL SYNCH BREAK ****/
 
-    	// NVIC_DisableIRQ
-    	bit = handle->uart_rtos_handle.base->S2;
-    	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  */
-    	bit = handle->uart_rtos_handle.base->S2;
-    	handle->uart_rtos_handle.base->S2 |= (1<<1);	/* LBKDE LIN Break Detection Enable */
-    	//handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  */
-    	bit = handle->uart_rtos_handle.base->S2;
+        /* Enable interrupt in NVIC. */
+        DisableIRQ(UART3_RX_TX_IRQn);
+        DisableIRQ(UART4_RX_TX_IRQn);
+        do
+        {
+        	handle->uart_rtos_handle.base->S2 |= (1<<1);	/* LBKDE LIN Break Detection Enable */
+        }while (0x80 != ((handle->uart_rtos_handle.base->S2) & 0x80));
     	handle->uart_rtos_handle.base->S2 &= (0<<1);	/* LBKDE LIN Break Detection Disable */
-    	bit = handle->uart_rtos_handle.base->S2;
     	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  */
-    	/// NVIC_DisableIRQ
-
-    	UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_header,size_of_lin_header_d, &n );
-
-
-
-
-
+    	EnableIRQ(UART3_RX_TX_IRQn);
+    	DisableIRQ(UART4_RX_TX_IRQn);
+    	do
+    	{
+    		UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_header,size_of_lin_header_d, &n );
+    	} while(0x0 == lin1p3_header[0]);
 
     	//synch_break_byte = 0xFF;
     	//do {
