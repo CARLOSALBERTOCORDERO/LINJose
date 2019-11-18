@@ -22,6 +22,9 @@
 /*Static function prototypes */
 static void master_task(void *pvParameters);
 static void slave_task(void *pvParameters);
+static uint8_t parityBitP0(uint8_t header);
+static uint8_t parityBitP1(uint8_t header);
+static uint8_t checksum(uint8_t * data, uint8_t dataLength);
 
 
 
@@ -109,6 +112,8 @@ static void master_task(void *pvParameters)
 	uint8_t  message_size = 0;
 	size_t n;
 	uint8_t  msg_idx;
+	uint8_t headerAux = 0u;
+	uint8_t chckSumAux = 0u;
 
 
 	if(handle == NULL) {
@@ -153,9 +158,10 @@ static void master_task(void *pvParameters)
         	/* Put the ID into the header */
         	lin1p3_header[1] = ID<<2;
         	/* TODO: put the parity bits */
-
-
-
+        	headerAux = parityBitP0(lin1p3_header[1]);
+        	lin1p3_header[1] |= headerAux;
+        	headerAux = parityBitP1(lin1p3_header[1]);
+        	lin1p3_header[1] |= headerAux;
 
         	/* Init the message recevie buffer */
         	memset(lin1p3_message, 0, size_of_uart_buffer);
@@ -175,17 +181,20 @@ static void master_task(void *pvParameters)
         	handle->uart_rtos_handle.base->C2 |= 0x01;  /*SBK Send Break ON */
         	handle->uart_rtos_handle.base->C2 &= 0xFE;	/*SBK Send Break OFF */
 
-        	//UART_RTOS_Send(&(handle->uart_rtos_handle), (uint8_t *)&synch_break_byte, 1);
-        	//vTaskDelay(1);
+        	//UART_RTOS_Send(&(handle->uart_rtos_handle), (uint8_t *)&synch_break_byte, 1);  older line
+
+        	vTaskDelay(1);  // make a small pause to prevent issues due to Rx slow break detection ''sin esto NO jala es la clave ''
         	/* Send the header */
         	UART_RTOS_Send(&(handle->uart_rtos_handle), (uint8_t *)lin1p3_header, size_of_lin_header_d);
         	/* Wait for the response */
         	UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_message, message_size, &n);
 
         	/* TODO: Check the checksum */
-
-
-
+        	chckSumAux = checksum((uint8_t *)&lin1p3_message[0], message_size);
+        	if(chckSumAux != lin1p3_message[message_size])
+        	{
+        		continue;
+        	}
 
         	/* Call the message callback */
         	handle->config.messageTable[msg_idx].handler((void*)lin1p3_message);
@@ -202,8 +211,11 @@ static void slave_task(void *pvParameters)
 	uint8_t  message_size = 0;
 	size_t n;
 	uint8_t  msg_idx;
-	//uint8_t synch_break_byte = 0xFF;
+	//uint8_t synch_break_byte = 0;
 	static uint8_t bit = 0;
+	uint8_t headerAuxP0 = 0u;
+	uint8_t headerAuxP1 = 0u;
+	uint8_t chckSumAux = 0u;
 
 	if(handle == NULL) {
 		vTaskSuspend(NULL);
@@ -226,11 +238,6 @@ static void slave_task(void *pvParameters)
         vTaskSuspend(NULL);
     }
 
-
-    DisableIRQ(UART3_RX_TX_IRQn);
-    DisableIRQ(UART4_RX_TX_IRQn);
-	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  */
-	handle->uart_rtos_handle.base->S2 |= (1<<1);	/* LBKDE LIN Break Detection Enable */
     while(1)
     {
     	char dummy;
@@ -238,39 +245,45 @@ static void slave_task(void *pvParameters)
     	memset(lin1p3_header, 0, size_of_lin_header_d);
     	/* Wait for a synch break This code is just waiting for one byte 0, *** CHANGE THIS WITH A REAL SYNCH BREAK ****/
 
-        /* Enable interrupt in NVIC. */
-        DisableIRQ(UART3_RX_TX_IRQn);
-        DisableIRQ(UART4_RX_TX_IRQn);
-        do
-        {
-        	handle->uart_rtos_handle.base->S2 |= (1<<1);	/* LBKDE LIN Break Detection Enable */
-        }while (0x80 != ((handle->uart_rtos_handle.base->S2) & 0x80));
-    	handle->uart_rtos_handle.base->S2 &= (0<<1);	/* LBKDE LIN Break Detection Disable */
-    	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  */
-    	EnableIRQ(UART3_RX_TX_IRQn);
-    	DisableIRQ(UART4_RX_TX_IRQn);
-    	do
-    	{
-    		UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_header,size_of_lin_header_d, &n );
-    	} while(0x0 == lin1p3_header[0]);
+        /* Disable interrupt in NVIC. */
+    	DisableIRQ(UART4_RX_TX_IRQn);  // slave
 
-    	//synch_break_byte = 0xFF;
-    	//do {
-    	//UART_RTOS_Receive(&(handle->uart_rtos_handle), &synch_break_byte, 1, &n);
-    	//}while(synch_break_byte != 0);
+    	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag  bit 7 en 1  "clean"  1000-0000 */
+    	handle->uart_rtos_handle.base->S2 |= (1<<1);	/* LBKDE LIN Break Detection Enable bit 1 en 1  0000-0010 */
+    	//bit = handle->uart_rtos_handle.base->S2;
 
-    	/* Wait for header on the UART */
-    	//UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_header,size_of_lin_header_d, &n );
+    	while((handle->uart_rtos_handle.base->S2 &  0x01<<7) == 0x00) vTaskDelay(1); // Wait for the flag to be set
+    	//bit = handle->uart_rtos_handle.base->S2;
+
+    	handle->uart_rtos_handle.base->S2 &= (0<<1);	/* LBKDE LIN Break Detection Disable bit 1 en 0 */
+    	handle->uart_rtos_handle.base->S2 |= (1<<7);  	/*LBKDIF LIN Break Detect Interruption Flag bit 7 en 1 "clean" */
+
+    	EnableIRQ(UART4_RX_TX_IRQn);  // slave
+
+    	UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_header,size_of_lin_header_d, &n );
+
+//    	synch_break_byte = 0xFF;   
+//    	do {
+//    	UART_RTOS_Receive(&(handle->uart_rtos_handle), &synch_break_byte, 1, &n);
+//    	}while(synch_break_byte != 0);
+//
+//    	/* Wait for header on the UART */
+//    	UART_RTOS_Receive(&(handle->uart_rtos_handle), lin1p3_header,size_of_lin_header_d, &n );
+
     	/* Check header */
     	if(/*(lin1p3_header[0] != 0x00) &&*/
-    	   (lin1p3_header[0] != 0x55)) {
+    	   (lin1p3_header[0] != 0x55))
+    	{
     		/* TODO: Check ID parity bits */
 
-
-
-
     		/* Header is not correct we are ignoring the header */
-    		continue;
+    		headerAuxP0 = lin1p3_header[1] & 0x02;
+    		headerAuxP1 = lin1p3_header[1] & 0x01;
+    		if((headerAuxP0 != parityBitP0(lin1p3_header[1])) || (headerAuxP1 != parityBitP1(lin1p3_header[1])))
+    		{
+    			continue;
+    		}
+
     	}
     	/* Get the message ID */
     	ID = (lin1p3_header[1] & 0xFC)>>2;
@@ -303,13 +316,61 @@ static void slave_task(void *pvParameters)
     		break;
     	}
     	/* TODO: Add the checksum to the message */
-
-
-
-
+    	chckSumAux = checksum((uint8_t *)&lin1p3_message[0], message_size);
+    	lin1p3_message[message_size] = chckSumAux;
 
     	message_size+=1;
     	/* Send the message data */
     	UART_RTOS_Send(&(handle->uart_rtos_handle), (uint8_t *)lin1p3_message, message_size);
     }
+}
+
+
+static uint8_t parityBitP0(uint8_t header)
+{
+	uint8_t returnVal = 0;
+	uint8_t bitID0 = header & 0x80;
+	uint8_t bitID1 = header & 0x40;
+	uint8_t bitID2 = header & 0x20;
+	uint8_t bitID4 = header & 0x08;
+    bitID0 >>= 7;
+    bitID1 >>= 6;
+    bitID2 >>= 5;
+    bitID4 >>= 3;
+    returnVal = bitID0 ^ bitID1;
+    returnVal ^= bitID2 ^ bitID4;
+    returnVal <<= 0x01;
+    return returnVal;
+}
+
+
+static uint8_t parityBitP1(uint8_t header)
+{
+	uint8_t returnVal = 0;
+	uint8_t bitID1 = header & 0x40;
+	uint8_t bitID3 = header & 0x10;
+	uint8_t bitID4 = header & 0x08;
+	uint8_t bitID5 = header & 0x04;
+    bitID1 >>= 6;
+    bitID3 >>= 4;
+    bitID4 >>= 3;
+    bitID5 >>= 2;
+    returnVal = bitID1 ^ bitID3;
+    returnVal ^= bitID4 ^ bitID5;
+    returnVal ^= 0x01;
+    return returnVal;
+}
+
+static uint8_t checksum(uint8_t * data, uint8_t dataLength)
+{
+	uint16_t auxSum = 0;
+	uint8_t returnVal = 0;
+	uint8_t index = 0;
+    for(index = 0; dataLength > index; index++)
+    {
+        auxSum += data[index];
+    }
+    returnVal = auxSum % 255;
+
+    return returnVal;
 }
